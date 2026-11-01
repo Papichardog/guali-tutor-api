@@ -1,0 +1,2387 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Guali Tutor API",
+    "version": "1.0.0",
+    "description": "API REST de **Guali Tutor** (Programación II, Fase 2). Administra la persistencia de la aplicación Swing de la Fase 1: configuración, lecciones (con sus imágenes) e historial.\n\nArquitectura: `Swing → HTTPS/JSON → API REST → JPA → MariaDB`. La compilación y ejecución del código del estudiante (guali-dev y el JDK configurado) **no** forman parte de esta API: ocurren en el cliente.\n\n## Convenciones\n- **Transporte:** HTTPS. En desarrollo, `https://localhost:8443` con un certificado autofirmado. Sin autenticación (el enunciado no la exige).\n- **Formato:** `application/json` en UTF-8, propiedades en camelCase. Los cuerpos de solicitud **rechazan propiedades desconocidas** (400).\n- **Fechas y horas:** ISO-8601 local del servidor, **sin zona horaria**, p. ej. `2026-10-14T21:30:05` (así las guarda la columna `DATETIME`).\n- **Identificadores:** enteros ≥ 1. Un id con formato inválido responde 400; uno inexistente, 404.\n- **Listados:** sin paginación y en orden estable (indicado en cada operación).\n\n## PUT vs PATCH\n- **PUT** reemplaza el recurso completo: todos los campos obligatorios deben enviarse y los campos anulables se envían explícitamente (`null` si no hay valor). Lo que no se envíe no se conserva: no existe el PUT parcial.\n- **PATCH** es una actualización parcial con semántica *JSON Merge Patch* (RFC 7396): un campo **ausente** no cambia; un campo **presente** se actualiza; un campo presente con `null` se borra (solo los anulables: `jdkPath`, `leccionesRootPath`, `leccionId`). `null` en un campo no anulable, o un cuerpo `{}`, responde 400. Un PATCH sobre un recurso inexistente responde 404.\n- Solo **PUT** puede crear un recurso, y únicamente en `/api/configuracion/{id}`, porque su id lo elige el cliente (la tabla no es AUTO_INCREMENT; la aplicación usa siempre `id = 1`). En lecciones e historial los ids los asigna el servidor: PUT sobre un id inexistente responde 404 y se crea con POST.\n\n## Errores\nToda respuesta de error usa el esquema `Error`: `status` (código HTTP), `error` (nombre HTTP en mayúsculas), `codigo` (código de negocio estable para que el cliente decida qué hacer, sin parsear texto), `message` (texto en español para mostrar), `path`, `timestamp` y, en errores de validación, la lista `errors` con un elemento por campo.\n\n| status | error | codigo |\n|---|---|---|\n| 400 | BAD_REQUEST | VALIDACION_FALLIDA, CUERPO_INVALIDO, PARAMETRO_INVALIDO, REFERENCIA_INVALIDA |\n| 404 | NOT_FOUND | RECURSO_NO_ENCONTRADO |\n| 409 | CONFLICT | LECCION_DUPLICADA, CONFIGURACION_DUPLICADA, ESTADO_NO_REGRESIVO |\n| 500 | INTERNAL_SERVER_ERROR | ERROR_INTERNO |\n\n## Imágenes de las lecciones\nLas imágenes se guardan en la tabla `leccion_imagenes` (relacionada con `lecciones`, `ON DELETE CASCADE`) pero **forman parte del recurso lección**: viajan dentro de `imagenes` (en base64) al crear, reemplazar y leer el detalle. No hay endpoints de imágenes. El listado `GET /api/lecciones` no las incluye. El `nombre` de cada imagen es el nombre de archivo que el Markdown referencia (por ejemplo `img-lec-1.png`); solo se admiten imágenes ubicadas directamente en la carpeta de la lección."
+  },
+  "servers": [
+    {
+      "url": "https://localhost:8443",
+      "description": "Desarrollo local (HTTPS, certificado autofirmado)"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Configuración",
+      "description": "Configuración global: ruta del JDK y carpeta raíz de lecciones (tabla `configuracion`)."
+    },
+    {
+      "name": "Lecciones",
+      "description": "Lecciones persistidas en la BD, con sus imágenes (tablas `lecciones` y `leccion_imagenes`)."
+    },
+    {
+      "name": "Historial",
+      "description": "Intentos del estudiante: aperturas de lecciones y su estado (tabla `historial`)."
+    }
+  ],
+  "paths": {
+    "/api/configuracion": {
+      "get": {
+        "tags": [
+          "Configuración"
+        ],
+        "operationId": "listarConfiguraciones",
+        "summary": "Listar las configuraciones",
+        "description": "Devuelve todas las filas de `configuracion` ordenadas por `id` (en la práctica, una sola: `id = 1`; la lista es vacía si todavía no se ha configurado nada).",
+        "responses": {
+          "200": {
+            "description": "Lista de configuraciones (posiblemente vacía).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Configuracion"
+                  }
+                },
+                "examples": {
+                  "unaConfiguracion": {
+                    "summary": "Configuración existente",
+                    "value": [
+                      {
+                        "id": 1,
+                        "jdkPath": "/Library/Java/JavaVirtualMachines/temurin-25.jdk/Contents/Home",
+                        "leccionesRootPath": "/Users/pablo/lecciones"
+                      }
+                    ]
+                  },
+                  "sinConfiguracion": {
+                    "summary": "Aún sin configurar",
+                    "value": []
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorInterno"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Configuración"
+        ],
+        "operationId": "crearConfiguracion",
+        "summary": "Crear una configuración",
+        "description": "Crea la configuración con el `id` indicado por el cliente. Si ya existe una con ese `id`, 409 `CONFIGURACION_DUPLICADA` (no se sobrescribe; para reemplazar use PUT).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfiguracionCreate"
+              },
+              "examples": {
+                "completa": {
+                  "summary": "Con JDK y carpeta de lecciones",
+                  "value": {
+                    "id": 1,
+                    "jdkPath": "/Library/Java/JavaVirtualMachines/temurin-25.jdk/Contents/Home",
+                    "leccionesRootPath": "/Users/pablo/lecciones"
+                  }
+                },
+                "soloJdk": {
+                  "summary": "Solo el JDK",
+                  "value": {
+                    "id": 1,
+                    "jdkPath": "/Library/Java/JavaVirtualMachines/temurin-25.jdk/Contents/Home"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Configuración creada.",
+            "headers": {
+              "Location": {
+                "$ref": "#/components/headers/Location"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Configuracion"
+                },
+                "examples": {
+                  "creada": {
+                    "summary": "Creada solo con el JDK",
+                    "value": {
+                      "id": 1,
+                      "jdkPath": "/Library/Java/JavaVirtualMachines/temurin-25.jdk/Contents/Home",
+                      "leccionesRootPath": null
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Solicitud inválida.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "validacion": {
+                    "summary": "Campos inválidos",
+                    "value": {
+                      "status": 400,
+                      "error": "BAD_REQUEST",
+                      "codigo": "VALIDACION_FALLIDA",
+                      "message": "Hay campos inválidos en la solicitud.",
+                      "path": "/api/configuracion",
+                      "timestamp": "2026-10-14T21:30:05",
+                      "errors": [
+                        {
+                          "campo": "id",
+                          "mensaje": "debe ser mayor o igual a 1"
+                        }
+                      ]
+                    }
+                  },
+                  "jsonMalformado": {
+                    "summary": "JSON malformado o con propiedades desconocidas",
+                    "value": {
+                      "status": 400,
+                      "error": "BAD_REQUEST",
+                      "codigo": "CUERPO_INVALIDO",
+                      "message": "El cuerpo no es un JSON válido o contiene propiedades desconocidas.",
+                      "path": "/api/configuracion",
+                      "timestamp": "2026-10-14T21:30:05"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Ya existe una configuración con ese id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "duplicada": {
+                    "summary": "Id repetido",
+                    "value": {
+                      "status": 409,
+                      "error": "CONFLICT",
+                      "codigo": "CONFIGURACION_DUPLICADA",
+                      "message": "Ya existe una configuración con id 1.",
+                      "path": "/api/configuracion",
+                      "timestamp": "2026-10-14T21:30:05"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorInterno"
+          }
+        }
+      }
+    },
+    "/api/configuracion/{id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/IdRecurso"
+        }
+      ],
+      "get": {
+        "tags": [
+          "Configuración"
+        ],
+        "operationId": "obtenerConfiguracion",
+        "summary": "Obtener una configuración",
+        "description": "Equivale a `ConfiguracionDAO.obtenerRutaJdk/obtenerRutaLecciones` de la Fase 1. 404 si todavía no existe.",
+        "responses": {
+          "200": {
+            "description": "La configuración.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Configuracion"
+                },
+                "examples": {
+                  "configuracion": {
+                    "summary": "Configuración completa",
+                    "value": {
+                      "id": 1,
+                      "jdkPath": "/Library/Java/JavaVirtualMachines/temurin-25.jdk/Contents/Home",
+                      "leccionesRootPath": "/Users/pablo/lecciones"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Identificador con formato inválido.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "idInvalido": {
+                    "summary": "El id no es un entero",
+                    "value": {
+                      "status": 400,
+                      "error": "BAD_REQUEST",
+                      "codigo": "PARAMETRO_INVALIDO",
+                      "message": "El identificador 'abc' no es un entero válido.",
+                      "path": "/api/configuracion/abc",
+                      "timestamp": "2026-10-14T21:30:05"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No existe un recurso con ese identificador.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "noExiste": {
+                    "summary": "Recurso inexistente",
+                    "value": {
+                      "status": 404,
+                      "error": "NOT_FOUND",
+                      "codigo": "RECURSO_NO_ENCONTRADO",
+                      "message": "No existe una configuración con id 7.",
+                      "path": "/api/configuracion/7",
+                      "timestamp": "2026-10-14T21:30:05"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorInterno"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Configuración"
+        ],
+        "operationId": "reemplazarConfiguracion",
+        "summary": "Reemplazar (o crear) una configuración",
+        "description": "**Reemplazo completo** de la configuración `{id}`: ambos campos son obligatorios y lo que no se envíe como valor queda en `null`. Si la configuración **no existe, se crea** (201): es la única operación PUT que crea, porque este id lo elige el cliente. Para cambiar un solo campo sin tocar el otro, use PATCH.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfiguracionUpdate"
+              },
+              "examples": {
+                "reemplazo": {
+                  "summary": "Reemplazo completo",
+                  "value": {
+                    "jdkPath": "/Library/Java/JavaVirtualMachines/temurin-25.jdk/Contents/Home",
+                    "leccionesRootPath": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Configuración reemplazada.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Configuracion"
+                },
+                "examples": {
+                  "reemplazada": {
+                    "summary": "Resultado",
+                    "value": {
+                      "id": 1,
+                      "jdkPath": "/Library/Java/JavaVirtualMachines/temurin-25.jdk/Contents/Home",
+                      "leccionesRootPath": null
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "La configuración no existía y se creó.",
+            "headers": {
+              "Location": {
+                "$ref": "#/components/headers/Location"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Configuracion"
+                },
+                "examples": {
+                  "creada": {
+                    "summary": "Resultado",
+                    "value": {
+                      "id": 1,
+                      "jdkPath": "/Library/Java/JavaVirtualMachines/temurin-25.jdk/Contents/Home",
+                      "leccionesRootPath": null
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Solicitud inválida (cuerpo o id).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "validacion": {
+                    "summary": "Campos inválidos",
+                    "value": {
+                      "status": 400,
+                      "error": "BAD_REQUEST",
+                      "codigo": "VALIDACION_FALLIDA",
+                      "message": "Hay campos inválidos en la solicitud.",
+                      "path": "/api/configuracion/1",
+                      "timestamp": "2026-10-14T21:30:05",
+                      "errors": [
+                        {
+                          "campo": "leccionesRootPath",
+                          "mensaje": "es obligatorio (envíe null si no hay valor)"
+                        }
+                      ]
+                    }
+                  },
+                  "jsonMalformado": {
+                    "summary": "JSON malformado o con propiedades desconocidas",
+                    "value": {
+                      "status": 400,
+                      "error": "BAD_REQUEST",
+                      "codigo": "CUERPO_INVALIDO",
+                      "message": "El cuerpo no es un JSON válido o contiene propiedades desconocidas.",
+                      "path": "/api/configuracion/1",
+                      "timestamp": "2026-10-14T21:30:05"
+                    }
+                  },
+                  "idInvalido": {
+                    "summary": "El id no es un entero",
+                    "value": {
+                      "status": 400,
+                      "error": "BAD_REQUEST",
+                      "codigo": "PARAMETRO_INVALIDO",
+                      "message": "El identificador 'abc' no es un entero válido.",
+                      "path": "/api/configuracion/abc",
+                      "timestamp": "2026-10-14T21:30:05"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorInterno"
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Configuración"
+        ],
+        "operationId": "actualizarParcialmenteConfiguracion",
+        "summary": "Actualizar parcialmente una configuración",
+        "description": "**Merge patch**: solo cambian los campos presentes; los ausentes se conservan y `null` borra el valor. Así configurar el JDK nunca sobrescribe la carpeta de lecciones (ni al revés). Un cuerpo `{}` o un campo desconocido responde 400. 404 si la configuración no existe (el cliente puede entonces crearla con POST o PUT).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfiguracionPatch"
+              },
+              "examples": {
+                "soloJdk": {
+                  "summary": "Cambiar solo el JDK",
+                  "value": {
+                    "jdkPath": "/Library/Java/JavaVirtualMachines/temurin-25.jdk/Contents/Home"
+                  }
+                },
+                "soloCarpeta": {
+                  "summary": "Cambiar solo la carpeta de lecciones",
+                  "value": {
+                    "leccionesRootPath": "/Users/pablo/lecciones"
+                  }
+                },
+                "borrarCarpeta": {
+                  "summary": "Borrar la carpeta de lecciones",
+                  "value": {
+                    "leccionesRootPath": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Configuración actualizada (representación completa; el campo no enviado conserva su valor).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Configuracion"
+                },
+                "examples": {
+                  "jdkCambiado": {
+                    "summary": "Se envió solo jdkPath; leccionesRootPath se conserva",
+                    "value": {
+                      "id": 1,
+                      "jdkPath": "/Library/Java/JavaVirtualMachines/temurin-25.jdk/Contents/Home",
+                      "leccionesRootPath": "/Users/pablo/lecciones"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Solicitud inválida.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "cuerpoVacio": {
+                    "summary": "Cuerpo {} sin campos",
+                    "value": {
+                      "status": 400,
+                      "error": "BAD_REQUEST",
+                      "codigo": "VALIDACION_FALLIDA",
+                      "message": "Hay campos inválidos en la solicitud.",
+                      "path": "/api/configuracion/1",
+                      "timestamp": "2026-10-14T21:30:05",
+                      "errors": [
+                        {
+                          "campo": "(cuerpo)",
+                          "mensaje": "debe incluir al menos un campo"
+                        }
+                      ]
+                    }
+                  },
+                  "campoDesconocido": {
+                    "summary": "Propiedad desconocida",
+                    "value": {
+                      "status": 400,
+                      "error": "BAD_REQUEST",
+                      "codigo": "CUERPO_INVALIDO",
+                      "message": "El cuerpo no es un JSON válido o contiene propiedades desconocidas.",
+                      "path": "/api/configuracion/1",
+                      "timestamp": "2026-10-14T21:30:05"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No existe un recurso con ese identificador.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "noExiste": {
+                    "summary": "Recurso inexistente",
+                    "value": {
+                      "status": 404,
+                      "error": "NOT_FOUND",
+                      "codigo": "RECURSO_NO_ENCONTRADO",
+                      "message": "No existe una configuración con id 1.",
+                      "path": "/api/configuracion/1",
+                      "timestamp": "2026-10-14T21:30:05"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorInterno"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Configuración"
+        ],
+        "operationId": "eliminarConfiguracion",
+        "summary": "Eliminar una configuración",
+        "description": "Elimina la fila. La aplicación volverá a pedir el JDK y la carpeta de lecciones.",
+        "responses": {
+          "204": {
+            "description": "Eliminada (sin cuerpo)."
+          },
+          "400": {
+            "description": "Identificador con formato inválido.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "idInvalido": {
+                    "summary": "El id no es un entero",
+                    "value": {
+                      "status": 400,
+                      "error": "BAD_REQUEST",
+                      "codigo": "PARAMETRO_INVALIDO",
+                      "message": "El identificador 'abc' no es un entero válido.",
+                      "path": "/api/configuracion/abc",
+                      "timestamp": "2026-10-14T21:30:05"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No existe un recurso con ese identificador.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "noExiste": {
+                    "summary": "Recurso inexistente",
+                    "value": {
+                      "status": 404,
+                      "error": "NOT_FOUND",
+                      "codigo": "RECURSO_NO_ENCONTRADO",
+                      "message": "No existe una configuración con id 7.",
+                      "path": "/api/configuracion/7",
+                      "timestamp": "2026-10-14T21:30:05"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorInterno"
+          }
+        }
+      }
+    },
+    "/api/lecciones": {
+      "get": {
+        "tags": [
+          "Lecciones"
+        ],
+        "operationId": "listarLecciones",
+        "summary": "Listar las lecciones (resumen)",
+        "description": "Devuelve las lecciones **sin** `contenidoMarkdown` ni imágenes, ordenadas por `nombre` de forma ascendente (equivale a `LeccionDAO.listarResumen`). Para el contenido use `GET /api/lecciones/{id}`.",
+        "responses": {
+          "200": {
+            "description": "Lista de lecciones (posiblemente vacía).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/LeccionResumen"
+                  }
+                },
+                "examples": {
+                  "dos": {
+                    "summary": "Dos lecciones",
+                    "value": [
+                      {
+                        "id": 1,
+                        "nombre": "leccion-01",
+                        "objetivo": "COMPILAR_EXITOSO",
+                        "fechaImportacion": "2026-10-14T20:15:00"
+                      },
+                      {
+                        "id": 2,
+                        "nombre": "leccion-02-errores",
+                        "objetivo": "EJECUTAR_CON_ERROR",
+                        "fechaImportacion": "2026-10-14T20:20:41"
+                      }
+                    ]
+                  },
+                  "vacia": {
+                    "summary": "Sin lecciones",
+                    "value": []
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorInterno"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Lecciones"
+        ],
+        "operationId": "crearLeccion",
+        "summary": "Crear una lección (Importar Lección a BD)",
+        "description": "Crea una lección con sus imágenes. El `nombre` es único **sin distinguir mayúsculas ni acentos**: si ya existe una lección con ese nombre, **no se sobrescribe ni modifica nada** y responde 409 `LECCION_DUPLICADA` (el cliente lo traduce a «ya existe una lección con ese nombre»). La respuesta incluye el detalle completo y la cabecera `Location`.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LeccionCreate"
+              },
+              "examples": {
+                "conImagen": {
+                  "summary": "Lección con una imagen",
+                  "value": {
+                    "nombre": "leccion-01",
+                    "contenidoMarkdown": "# Hola mundo\n\nEscribe este programa:\n\n![diagrama](img-lec-1.png)\n",
+                    "objetivo": "COMPILAR_EXITOSO",
+                    "imagenes": [
+                      {
+                        "nombre": "img-lec-1.png",
+                        "mimeType": "image/png",
+                        "contenidoBase64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+                      }
+                    ]
+                  }
+                },
+                "sinImagenes": {
+                  "summary": "Lección sin imágenes",
+                  "value": {
+                    "nombre": "leccion-02-errores",
+                    "contenidoMarkdown": "# Errores\n",
+                    "objetivo": "EJECUTAR_CON_ERROR"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Lección creada.",
+            "headers": {
+              "Location": {
+                "$ref": "#/components/headers/Location"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Leccion"
+                },
+                "examples": {
+                  "creada": {
+                    "summary": "Detalle de la lección creada",
+                    "value": {
+                      "id": 1,
+                      "nombre": "leccion-01",
+                      "contenidoMarkdown": "# Hola mundo\n\nEscribe este programa:\n\n![diagrama](img-lec-1.png)\n",
+                      "objetivo": "COMPILAR_EXITOSO",
+                      "fechaImportacion": "2026-10-14T20:15:00",
+                      "imagenes": [
+                        {
+                          "nombre": "img-lec-1.png",
+                          "mimeType": "image/png",
+                          "contenidoBase64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Solicitud inválida.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "validacion": {
+                    "summary": "Campos inválidos",
+                    "value": {
+                      "status": 400,
+                      "error": "BAD_REQUEST",
+                      "codigo": "VALIDACION_FALLIDA",
+                      "message": "Hay campos inválidos en la solicitud.",
+                      "path": "/api/lecciones",
+                      "timestamp": "2026-10-14T21:30:05",
+                      "errors": [
+                        {
+                          "campo": "objetivo",
+                          "mensaje": "debe ser uno de: COMPILAR_CON_ERROR, COMPILAR_EXITOSO, EJECUTAR_CON_ERROR, EJECUTAR_EXITOSO"
+                        },
+                        {
+                          "campo": "imagenes[0].mimeType",
+                          "mensaje": "debe ser uno de: image/png, image/jpeg, image/gif, image/webp"
+                        }
+                      ]
+                    }
+                  },
+                  "jsonMalformado": {
+                    "summary": "JSON malformado o con propiedades desconocidas",
+                    "value": {
+                      "status": 400,
+                      "error": "BAD_REQUEST",
+                      "codigo": "CUERPO_INVALIDO",
+                      "message": "El cuerpo no es un JSON válido o contiene propiedades desconocidas.",
+                      "path": "/api/lecciones",
+                      "timestamp": "2026-10-14T21:30:05"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Ya existe una lección con ese nombre.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "duplicada": {
+                    "summary": "Nombre repetido",
+                    "value": {
+                      "status": 409,
+                      "error": "CONFLICT",
+                      "codigo": "LECCION_DUPLICADA",
+                      "message": "Ya existe una lección con el nombre 'leccion-01'.",
+                      "path": "/api/lecciones",
+                      "timestamp": "2026-10-14T21:30:05"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorInterno"
+          }
+        }
+      }
+    },
+    "/api/lecciones/{id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/IdRecurso"
+        }
+      ],
+      "get": {
+        "tags": [
+          "Lecciones"
+        ],
+        "operationId": "obtenerLeccion",
+        "summary": "Obtener una lección completa",
+        "description": "Detalle con `contenidoMarkdown` e `imagenes` (equivale a `LeccionDAO.obtenerPorId` más sus imágenes).",
+        "responses": {
+          "200": {
+            "description": "La lección.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Leccion"
+                },
+                "examples": {
+                  "detalle": {
+                    "summary": "Lección con una imagen",
+                    "value": {
+                      "id": 1,
+                      "nombre": "leccion-01",
+                      "contenidoMarkdown": "# Hola mundo\n\nEscribe este programa:\n\n![diagrama](img-lec-1.png)\n",
+                      "objetivo": "COMPILAR_EXITOSO",
+                      "fechaImportacion": "2026-10-14T20:15:00",
+                      "imagenes": [
+                        {
+                          "nombre": "img-lec-1.png",
+                          "mimeType": "image/png",
+                          "contenidoBase64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Identificador con formato inválido.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "idInvalido": {
+                    "summary": "El id no es un entero",
+                    "value": {
+                      "status": 400,
+                      "error": "BAD_REQUEST",
+                      "codigo": "PARAMETRO_INVALIDO",
+                      "message": "El identificador 'abc' no es un entero válido.",
+                      "path": "/api/lecciones/abc",
+                      "timestamp": "2026-10-14T21:30:05"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No existe un recurso con ese identificador.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "noExiste": {
+                    "summary": "Recurso inexistente",
+                    "value": {
+                      "status": 404,
+                      "error": "NOT_FOUND",
+                      "codigo": "RECURSO_NO_ENCONTRADO",
+                      "message": "No existe una lección con id 7.",
+                      "path": "/api/lecciones/7",
+                      "timestamp": "2026-10-14T21:30:05"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorInterno"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Lecciones"
+        ],
+        "operationId": "reemplazarLeccion",
+        "summary": "Reemplazar una lección",
+        "description": "**Reemplazo completo** de la lección `{id}`: nombre, Markdown, objetivo e imágenes. El conjunto de `imagenes` enviado sustituye al anterior (`[]` las elimina todas). `fechaImportacion` no cambia. Si el nuevo `nombre` coincide con **otra** lección, 409 `LECCION_DUPLICADA`; dejar el nombre propio no es conflicto. No crea: si el `id` no existe, 404. Las lecciones no tienen PATCH.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LeccionUpdate"
+              },
+              "examples": {
+                "reemplazo": {
+                  "summary": "Reemplazo con imagen",
+                  "value": {
+                    "nombre": "leccion-01",
+                    "contenidoMarkdown": "# Hola mundo\n\nEscribe este programa:\n\n![diagrama](img-lec-1.png)\n",
+                    "objetivo": "COMPILAR_EXITOSO",
+                    "imagenes": [
+                      {
+                        "nombre": "img-lec-1.png",
+                        "mimeType": "image/png",
+                        "contenidoBase64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+                      }
+                    ]
+                  }
+                },
+                "quitarImagenes": {
+                  "summary": "Quitar todas las imágenes",
+                  "value": {
+                    "nombre": "leccion-01",
+                    "contenidoMarkdown": "# Hola mundo\n",
+                    "objetivo": "COMPILAR_EXITOSO",
+                    "imagenes": []
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Lección reemplazada.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Leccion"
+                },
+                "examples": {
+                  "reemplazada": {
+                    "summary": "Resultado",
+                    "value": {
+                      "id": 1,
+                      "nombre": "leccion-01",
+                      "contenidoMarkdown": "# Hola mundo\n\nEscribe este programa:\n\n![diagrama](img-lec-1.png)\n",
+                      "objetivo": "COMPILAR_EXITOSO",
+                      "fechaImportacion": "2026-10-14T20:15:00",
+                      "imagenes": [
+                        {
+                          "nombre": "img-lec-1.png",
+                          "mimeType": "image/png",
+                          "contenidoBase64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Solicitud inválida (cuerpo o id).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "validacion": {
+                    "summary": "Campos inválidos",
+                    "value": {
+                      "status": 400,
+                      "error": "BAD_REQUEST",
+                      "codigo": "VALIDACION_FALLIDA",
+                      "message": "Hay campos inválidos en la solicitud.",
+                      "path": "/api/lecciones/1",
+                      "timestamp": "2026-10-14T21:30:05",
+                      "errors": [
+                        {
+                          "campo": "imagenes",
+                          "mensaje": "es obligatorio (envíe [] para no tener imágenes)"
+                        }
+                      ]
+                    }
+                  },
+                  "jsonMalformado": {
+                    "summary": "JSON malformado o con propiedades desconocidas",
+                    "value": {
+                      "status": 400,
+                      "error": "BAD_REQUEST",
+                      "codigo": "CUERPO_INVALIDO",
+                      "message": "El cuerpo no es un JSON válido o contiene propiedades desconocidas.",
+                      "path": "/api/lecciones/1",
+                      "timestamp": "2026-10-14T21:30:05"
+                    }
+                  },
+                  "imagenRepetida": {
+                    "summary": "Dos imágenes con el mismo nombre",
+                    "value": {
+                      "status": 400,
+                      "error": "BAD_REQUEST",
+                      "codigo": "VALIDACION_FALLIDA",
+                      "message": "Hay campos inválidos en la solicitud.",
+                      "path": "/api/lecciones/1",
+                      "timestamp": "2026-10-14T21:30:05",
+                      "errors": [
+                        {
+                          "campo": "imagenes[1].nombre",
+                          "mensaje": "ya aparece en otra imagen de la lección"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No existe un recurso con ese identificador.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "noExiste": {
+                    "summary": "Recurso inexistente",
+                    "value": {
+                      "status": 404,
+                      "error": "NOT_FOUND",
+                      "codigo": "RECURSO_NO_ENCONTRADO",
+                      "message": "No existe una lección con id 7.",
+                      "path": "/api/lecciones/7",
+                      "timestamp": "2026-10-14T21:30:05"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Otro registro ya usa ese nombre.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "duplicada": {
+                    "summary": "Nombre de otra lección",
+                    "value": {
+                      "status": 409,
+                      "error": "CONFLICT",
+                      "codigo": "LECCION_DUPLICADA",
+                      "message": "Ya existe una lección con el nombre 'leccion-02-errores'.",
+                      "path": "/api/lecciones/1",
+                      "timestamp": "2026-10-14T21:30:05"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorInterno"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Lecciones"
+        ],
+        "operationId": "eliminarLeccion",
+        "summary": "Eliminar una lección",
+        "description": "Elimina la lección y, por `ON DELETE CASCADE`, **sus imágenes**. **No** borra el historial: los registros que la referenciaban quedan con `leccionId = null` (`ON DELETE SET NULL`) y conservan `nombreLeccion` y `estado`.",
+        "responses": {
+          "204": {
+            "description": "Eliminada (sin cuerpo)."
+          },
+          "400": {
+            "description": "Identificador con formato inválido.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "idInvalido": {
+                    "summary": "El id no es un entero",
+                    "value": {
+                      "status": 400,
+                      "error": "BAD_REQUEST",
+                      "codigo": "PARAMETRO_INVALIDO",
+                      "message": "El identificador 'abc' no es un entero válido.",
+                      "path": "/api/lecciones/abc",
+                      "timestamp": "2026-10-14T21:30:05"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No existe un recurso con ese identificador.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "noExiste": {
+                    "summary": "Recurso inexistente",
+                    "value": {
+                      "status": 404,
+                      "error": "NOT_FOUND",
+                      "codigo": "RECURSO_NO_ENCONTRADO",
+                      "message": "No existe una lección con id 7.",
+                      "path": "/api/lecciones/7",
+                      "timestamp": "2026-10-14T21:30:05"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorInterno"
+          }
+        }
+      }
+    },
+    "/api/historial": {
+      "get": {
+        "tags": [
+          "Historial"
+        ],
+        "operationId": "listarHistorial",
+        "summary": "Listar el historial",
+        "description": "Devuelve **todo** lo persistido, del intento más antiguo al más reciente: orden ascendente por `horaApertura` y, para el mismo segundo, por `id` (equivale a `HistorialDAO.listarTodos`).",
+        "responses": {
+          "200": {
+            "description": "Lista de intentos (posiblemente vacía).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Historial"
+                  }
+                },
+                "examples": {
+                  "dos": {
+                    "summary": "Dos intentos",
+                    "value": [
+                      {
+                        "id": 15,
+                        "leccionId": null,
+                        "nombreLeccion": "leccion-01",
+                        "horaApertura": "2026-10-14T21:30:05",
+                        "estado": "Completada"
+                      },
+                      {
+                        "id": 16,
+                        "leccionId": 1,
+                        "nombreLeccion": "leccion-01",
+                        "horaApertura": "2026-10-14T21:45:10",
+                        "estado": "Completada"
+                      }
+                    ]
+                  },
+                  "vacio": {
+                    "summary": "Sin historial",
+                    "value": []
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorInterno"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Historial"
+        ],
+        "operationId": "crearRegistroHistorial",
+        "summary": "Registrar un intento (apertura de lección)",
+        "description": "Crea un registro. Con solo `nombreLeccion`, queda `Pendiente`, con la hora actual del servidor y `leccionId = null` (lección local). Si se envía `leccionId`, debe existir en `lecciones`; si no, 400 `REFERENCIA_INVALIDA`. La respuesta incluye el `id` generado, que el cliente usa para completar el intento después.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HistorialCreate"
+              },
+              "examples": {
+                "leccionLocal": {
+                  "summary": "Apertura de una lección local",
+                  "value": {
+                    "nombreLeccion": "leccion-01"
+                  }
+                },
+                "leccionDeLaBD": {
+                  "summary": "Apertura de una lección de la BD",
+                  "value": {
+                    "leccionId": 1,
+                    "nombreLeccion": "leccion-01"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Intento registrado.",
+            "headers": {
+              "Location": {
+                "$ref": "#/components/headers/Location"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Historial"
+                },
+                "examples": {
+                  "creado": {
+                    "summary": "Registro Pendiente",
+                    "value": {
+                      "id": 15,
+                      "leccionId": null,
+                      "nombreLeccion": "leccion-01",
+                      "horaApertura": "2026-10-14T21:30:05",
+                      "estado": "Pendiente"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Solicitud inválida.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "validacion": {
+                    "summary": "Campos inválidos",
+                    "value": {
+                      "status": 400,
+                      "error": "BAD_REQUEST",
+                      "codigo": "VALIDACION_FALLIDA",
+                      "message": "Hay campos inválidos en la solicitud.",
+                      "path": "/api/historial",
+                      "timestamp": "2026-10-14T21:30:05",
+                      "errors": [
+                        {
+                          "campo": "nombreLeccion",
+                          "mensaje": "no puede estar en blanco"
+                        }
+                      ]
+                    }
+                  },
+                  "jsonMalformado": {
+                    "summary": "JSON malformado o con propiedades desconocidas",
+                    "value": {
+                      "status": 400,
+                      "error": "BAD_REQUEST",
+                      "codigo": "CUERPO_INVALIDO",
+                      "message": "El cuerpo no es un JSON válido o contiene propiedades desconocidas.",
+                      "path": "/api/historial",
+                      "timestamp": "2026-10-14T21:30:05"
+                    }
+                  },
+                  "referenciaInvalida": {
+                    "summary": "leccionId inexistente",
+                    "value": {
+                      "status": 400,
+                      "error": "BAD_REQUEST",
+                      "codigo": "REFERENCIA_INVALIDA",
+                      "message": "No existe una lección con id 99.",
+                      "path": "/api/historial",
+                      "timestamp": "2026-10-14T21:30:05",
+                      "errors": [
+                        {
+                          "campo": "leccionId",
+                          "mensaje": "no existe una lección con ese id"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorInterno"
+          }
+        }
+      }
+    },
+    "/api/historial/{id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/IdRecurso"
+        }
+      ],
+      "get": {
+        "tags": [
+          "Historial"
+        ],
+        "operationId": "obtenerRegistroHistorial",
+        "summary": "Obtener un registro del historial",
+        "responses": {
+          "200": {
+            "description": "El registro.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Historial"
+                },
+                "examples": {
+                  "registro": {
+                    "summary": "Registro Completada",
+                    "value": {
+                      "id": 15,
+                      "leccionId": null,
+                      "nombreLeccion": "leccion-01",
+                      "horaApertura": "2026-10-14T21:30:05",
+                      "estado": "Completada"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Identificador con formato inválido.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "idInvalido": {
+                    "summary": "El id no es un entero",
+                    "value": {
+                      "status": 400,
+                      "error": "BAD_REQUEST",
+                      "codigo": "PARAMETRO_INVALIDO",
+                      "message": "El identificador 'abc' no es un entero válido.",
+                      "path": "/api/historial/abc",
+                      "timestamp": "2026-10-14T21:30:05"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No existe un recurso con ese identificador.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "noExiste": {
+                    "summary": "Recurso inexistente",
+                    "value": {
+                      "status": 404,
+                      "error": "NOT_FOUND",
+                      "codigo": "RECURSO_NO_ENCONTRADO",
+                      "message": "No existe un registro de historial con id 99.",
+                      "path": "/api/historial/99",
+                      "timestamp": "2026-10-14T21:30:05"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorInterno"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Historial"
+        ],
+        "operationId": "reemplazarRegistroHistorial",
+        "summary": "Reemplazar un registro del historial",
+        "description": "**Reemplazo completo**: los cuatro campos son obligatorios (`leccionId` puede ser `null`). No crea: si el `id` no existe, 404. Regla de negocio: un registro `Completada` **no puede volver a `Pendiente`** (409 `ESTADO_NO_REGRESIVO`); mantener `Completada` sí es válido.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HistorialUpdate"
+              },
+              "examples": {
+                "reemplazo": {
+                  "summary": "Reemplazo completo",
+                  "value": {
+                    "leccionId": null,
+                    "nombreLeccion": "leccion-01",
+                    "horaApertura": "2026-10-14T21:30:05",
+                    "estado": "Completada"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Registro reemplazado.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Historial"
+                },
+                "examples": {
+                  "reemplazado": {
+                    "summary": "Resultado",
+                    "value": {
+                      "id": 15,
+                      "leccionId": null,
+                      "nombreLeccion": "leccion-01",
+                      "horaApertura": "2026-10-14T21:30:05",
+                      "estado": "Completada"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Solicitud inválida (cuerpo, id o referencia).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "validacion": {
+                    "summary": "Campos inválidos",
+                    "value": {
+                      "status": 400,
+                      "error": "BAD_REQUEST",
+                      "codigo": "VALIDACION_FALLIDA",
+                      "message": "Hay campos inválidos en la solicitud.",
+                      "path": "/api/historial/15",
+                      "timestamp": "2026-10-14T21:30:05",
+                      "errors": [
+                        {
+                          "campo": "estado",
+                          "mensaje": "debe ser uno de: Pendiente, Completada"
+                        }
+                      ]
+                    }
+                  },
+                  "jsonMalformado": {
+                    "summary": "JSON malformado o con propiedades desconocidas",
+                    "value": {
+                      "status": 400,
+                      "error": "BAD_REQUEST",
+                      "codigo": "CUERPO_INVALIDO",
+                      "message": "El cuerpo no es un JSON válido o contiene propiedades desconocidas.",
+                      "path": "/api/historial/15",
+                      "timestamp": "2026-10-14T21:30:05"
+                    }
+                  },
+                  "referenciaInvalida": {
+                    "summary": "leccionId inexistente",
+                    "value": {
+                      "status": 400,
+                      "error": "BAD_REQUEST",
+                      "codigo": "REFERENCIA_INVALIDA",
+                      "message": "No existe una lección con id 99.",
+                      "path": "/api/historial/15",
+                      "timestamp": "2026-10-14T21:30:05",
+                      "errors": [
+                        {
+                          "campo": "leccionId",
+                          "mensaje": "no existe una lección con ese id"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No existe un recurso con ese identificador.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "noExiste": {
+                    "summary": "Recurso inexistente",
+                    "value": {
+                      "status": 404,
+                      "error": "NOT_FOUND",
+                      "codigo": "RECURSO_NO_ENCONTRADO",
+                      "message": "No existe un registro de historial con id 99.",
+                      "path": "/api/historial/99",
+                      "timestamp": "2026-10-14T21:30:05"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Transición de estado no permitida.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "regresion": {
+                    "summary": "Completada → Pendiente",
+                    "value": {
+                      "status": 409,
+                      "error": "CONFLICT",
+                      "codigo": "ESTADO_NO_REGRESIVO",
+                      "message": "Un registro Completada no puede volver a Pendiente.",
+                      "path": "/api/historial/15",
+                      "timestamp": "2026-10-14T21:30:05"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorInterno"
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Historial"
+        ],
+        "operationId": "actualizarParcialmenteRegistroHistorial",
+        "summary": "Actualizar parcialmente un registro (p. ej. marcar Completada)",
+        "description": "**Merge patch**: solo cambian los campos presentes. Es la operación que usa Guali para marcar un intento como `Completada` (`{\"estado\": \"Completada\"}`); no existe una operación aparte tipo «marcarCompletada». Es **idempotente**: enviar `Completada` a un registro que ya lo está responde 200 sin cambios; si el registro no existe, 404. Un cuerpo `{}`, `null` en un campo no anulable, o una propiedad desconocida responden 400. Pasar de `Completada` a `Pendiente` responde 409 `ESTADO_NO_REGRESIVO`.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HistorialPatch"
+              },
+              "examples": {
+                "completar": {
+                  "summary": "Marcar el intento como Completada",
+                  "value": {
+                    "estado": "Completada"
+                  }
+                },
+                "desvincular": {
+                  "summary": "Quitar la referencia a la lección",
+                  "value": {
+                    "leccionId": null
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Registro actualizado (representación completa).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Historial"
+                },
+                "examples": {
+                  "completado": {
+                    "summary": "Registro Completada",
+                    "value": {
+                      "id": 15,
+                      "leccionId": null,
+                      "nombreLeccion": "leccion-01",
+                      "horaApertura": "2026-10-14T21:30:05",
+                      "estado": "Completada"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Solicitud inválida.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "cuerpoVacio": {
+                    "summary": "Cuerpo {} sin campos",
+                    "value": {
+                      "status": 400,
+                      "error": "BAD_REQUEST",
+                      "codigo": "VALIDACION_FALLIDA",
+                      "message": "Hay campos inválidos en la solicitud.",
+                      "path": "/api/historial/15",
+                      "timestamp": "2026-10-14T21:30:05",
+                      "errors": [
+                        {
+                          "campo": "(cuerpo)",
+                          "mensaje": "debe incluir al menos un campo"
+                        }
+                      ]
+                    }
+                  },
+                  "nullNoPermitido": {
+                    "summary": "null en un campo no anulable",
+                    "value": {
+                      "status": 400,
+                      "error": "BAD_REQUEST",
+                      "codigo": "VALIDACION_FALLIDA",
+                      "message": "Hay campos inválidos en la solicitud.",
+                      "path": "/api/historial/15",
+                      "timestamp": "2026-10-14T21:30:05",
+                      "errors": [
+                        {
+                          "campo": "estado",
+                          "mensaje": "no puede ser null"
+                        }
+                      ]
+                    }
+                  },
+                  "idInvalido": {
+                    "summary": "El id no es un entero",
+                    "value": {
+                      "status": 400,
+                      "error": "BAD_REQUEST",
+                      "codigo": "PARAMETRO_INVALIDO",
+                      "message": "El identificador 'abc' no es un entero válido.",
+                      "path": "/api/historial/abc",
+                      "timestamp": "2026-10-14T21:30:05"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No existe un recurso con ese identificador.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "noExiste": {
+                    "summary": "Recurso inexistente",
+                    "value": {
+                      "status": 404,
+                      "error": "NOT_FOUND",
+                      "codigo": "RECURSO_NO_ENCONTRADO",
+                      "message": "No existe un registro de historial con id 99.",
+                      "path": "/api/historial/99",
+                      "timestamp": "2026-10-14T21:30:05"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Transición de estado no permitida.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "regresion": {
+                    "summary": "Completada → Pendiente",
+                    "value": {
+                      "status": 409,
+                      "error": "CONFLICT",
+                      "codigo": "ESTADO_NO_REGRESIVO",
+                      "message": "Un registro Completada no puede volver a Pendiente.",
+                      "path": "/api/historial/15",
+                      "timestamp": "2026-10-14T21:30:05"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorInterno"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Historial"
+        ],
+        "operationId": "eliminarRegistroHistorial",
+        "summary": "Eliminar un registro del historial",
+        "responses": {
+          "204": {
+            "description": "Eliminado (sin cuerpo)."
+          },
+          "400": {
+            "description": "Identificador con formato inválido.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "idInvalido": {
+                    "summary": "El id no es un entero",
+                    "value": {
+                      "status": 400,
+                      "error": "BAD_REQUEST",
+                      "codigo": "PARAMETRO_INVALIDO",
+                      "message": "El identificador 'abc' no es un entero válido.",
+                      "path": "/api/historial/abc",
+                      "timestamp": "2026-10-14T21:30:05"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No existe un recurso con ese identificador.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "noExiste": {
+                    "summary": "Recurso inexistente",
+                    "value": {
+                      "status": 404,
+                      "error": "NOT_FOUND",
+                      "codigo": "RECURSO_NO_ENCONTRADO",
+                      "message": "No existe un registro de historial con id 99.",
+                      "path": "/api/historial/99",
+                      "timestamp": "2026-10-14T21:30:05"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorInterno"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "FechaHoraLocal": {
+        "type": "string",
+        "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?$",
+        "example": "2026-10-14T21:30:05",
+        "description": "Fecha y hora ISO-8601 local del servidor, sin zona horaria (`yyyy-MM-ddTHH:mm:ss`, con fracción opcional)."
+      },
+      "Objetivo": {
+        "type": "string",
+        "enum": [
+          "COMPILAR_CON_ERROR",
+          "COMPILAR_EXITOSO",
+          "EJECUTAR_CON_ERROR",
+          "EJECUTAR_EXITOSO"
+        ],
+        "example": "COMPILAR_EXITOSO",
+        "description": "Objetivo de la lección (los cuatro valores de `config.txt`); define cuándo queda Completada."
+      },
+      "EstadoHistorial": {
+        "type": "string",
+        "enum": [
+          "Pendiente",
+          "Completada"
+        ],
+        "example": "Pendiente",
+        "description": "Estado de un intento. Una vez `Completada`, un registro no puede volver a `Pendiente`."
+      },
+      "ErrorCampo": {
+        "type": "object",
+        "required": [
+          "campo",
+          "mensaje"
+        ],
+        "properties": {
+          "campo": {
+            "type": "string",
+            "example": "objetivo",
+            "description": "Nombre del campo (con ruta, p. ej. `imagenes[0].mimeType`)."
+          },
+          "mensaje": {
+            "type": "string",
+            "example": "debe ser uno de: COMPILAR_CON_ERROR, COMPILAR_EXITOSO, EJECUTAR_CON_ERROR, EJECUTAR_EXITOSO"
+          }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "required": [
+          "status",
+          "error",
+          "codigo",
+          "message",
+          "path",
+          "timestamp"
+        ],
+        "properties": {
+          "status": {
+            "type": "integer",
+            "format": "int32",
+            "example": 409
+          },
+          "error": {
+            "type": "string",
+            "enum": [
+              "BAD_REQUEST",
+              "NOT_FOUND",
+              "CONFLICT",
+              "INTERNAL_SERVER_ERROR"
+            ],
+            "example": "CONFLICT"
+          },
+          "codigo": {
+            "type": "string",
+            "example": "LECCION_DUPLICADA",
+            "enum": [
+              "VALIDACION_FALLIDA",
+              "CUERPO_INVALIDO",
+              "PARAMETRO_INVALIDO",
+              "REFERENCIA_INVALIDA",
+              "RECURSO_NO_ENCONTRADO",
+              "LECCION_DUPLICADA",
+              "CONFIGURACION_DUPLICADA",
+              "ESTADO_NO_REGRESIVO",
+              "ERROR_INTERNO"
+            ],
+            "description": "Código de negocio estable. El cliente debe decidir con este campo, no con `message`."
+          },
+          "message": {
+            "type": "string",
+            "example": "Ya existe una lección con el nombre 'leccion-01'.",
+            "description": "Texto en español apto para mostrarse al usuario."
+          },
+          "path": {
+            "type": "string",
+            "example": "/api/lecciones"
+          },
+          "timestamp": {
+            "$ref": "#/components/schemas/FechaHoraLocal"
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ErrorCampo"
+            },
+            "description": "Solo en `VALIDACION_FALLIDA`: un elemento por campo inválido."
+          }
+        }
+      },
+      "Configuracion": {
+        "type": "object",
+        "required": [
+          "id",
+          "jdkPath",
+          "leccionesRootPath"
+        ],
+        "description": "Configuración global de la aplicación (tabla `configuracion`). En la práctica existe una sola fila, `id = 1`.",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 1,
+            "example": 1
+          },
+          "jdkPath": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 500,
+            "example": "/Library/Java/JavaVirtualMachines/temurin-25.jdk/Contents/Home",
+            "description": "Ruta de la carpeta raíz del JDK en la máquina del cliente. La API **no** comprueba que exista (lo valida el cliente)."
+          },
+          "leccionesRootPath": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 500,
+            "example": "/Users/pablo/lecciones",
+            "description": "Ruta de la carpeta raíz de lecciones locales en la máquina del cliente."
+          }
+        }
+      },
+      "ConfiguracionCreate": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false,
+        "description": "Alta de configuración. El `id` lo elige el cliente; si ya existe, 409.",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 1,
+            "example": 1
+          },
+          "jdkPath": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 500,
+            "example": "/Library/Java/JavaVirtualMachines/temurin-25.jdk/Contents/Home",
+            "description": "Ruta de la carpeta raíz del JDK en la máquina del cliente. La API **no** comprueba que exista (lo valida el cliente)."
+          },
+          "leccionesRootPath": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 500,
+            "example": "/Users/pablo/lecciones",
+            "description": "Ruta de la carpeta raíz de lecciones locales en la máquina del cliente."
+          }
+        }
+      },
+      "ConfiguracionUpdate": {
+        "type": "object",
+        "required": [
+          "jdkPath",
+          "leccionesRootPath"
+        ],
+        "additionalProperties": false,
+        "description": "Reemplazo completo (PUT). Ambos campos son obligatorios; envíe `null` para dejar uno sin valor.",
+        "properties": {
+          "jdkPath": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 500,
+            "example": "/Library/Java/JavaVirtualMachines/temurin-25.jdk/Contents/Home",
+            "description": "Ruta de la carpeta raíz del JDK en la máquina del cliente. La API **no** comprueba que exista (lo valida el cliente)."
+          },
+          "leccionesRootPath": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 500,
+            "example": "/Users/pablo/lecciones",
+            "description": "Ruta de la carpeta raíz de lecciones locales en la máquina del cliente."
+          }
+        }
+      },
+      "ConfiguracionPatch": {
+        "type": "object",
+        "minProperties": 1,
+        "additionalProperties": false,
+        "description": "Actualización parcial (PATCH, merge-patch). Solo se modifican los campos presentes; `null` borra el valor.",
+        "properties": {
+          "jdkPath": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 500,
+            "example": "/Library/Java/JavaVirtualMachines/temurin-25.jdk/Contents/Home",
+            "description": "Ruta de la carpeta raíz del JDK en la máquina del cliente. La API **no** comprueba que exista (lo valida el cliente)."
+          },
+          "leccionesRootPath": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 500,
+            "example": "/Users/pablo/lecciones",
+            "description": "Ruta de la carpeta raíz de lecciones locales en la máquina del cliente."
+          }
+        }
+      },
+      "LeccionImagen": {
+        "type": "object",
+        "required": [
+          "nombre",
+          "mimeType",
+          "contenidoBase64"
+        ],
+        "additionalProperties": false,
+        "description": "Imagen de una lección (fila de `leccion_imagenes`). No tiene endpoints propios.",
+        "properties": {
+          "nombre": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "pattern": "^[^/\\\\]+$",
+            "example": "img-lec-1.png",
+            "description": "Nombre de archivo tal como lo referencia el Markdown. Sin separadores de ruta (`/`, `\\`). Debe ser único dentro de la lección."
+          },
+          "mimeType": {
+            "type": "string",
+            "enum": [
+              "image/png",
+              "image/jpeg",
+              "image/gif",
+              "image/webp"
+            ],
+            "example": "image/png"
+          },
+          "contenidoBase64": {
+            "type": "string",
+            "format": "byte",
+            "minLength": 1,
+            "maxLength": 7000000,
+            "example": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+            "description": "Contenido binario codificado en base64 (máximo ≈ 5 MB decodificado)."
+          }
+        }
+      },
+      "LeccionResumen": {
+        "type": "object",
+        "required": [
+          "id",
+          "nombre",
+          "objetivo",
+          "fechaImportacion"
+        ],
+        "description": "Elemento del listado de lecciones: **sin** `contenidoMarkdown` ni imágenes, para no descargar todo el contenido solo para llenar una lista.",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 1,
+            "example": 1
+          },
+          "nombre": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "pattern": "\\S",
+            "example": "leccion-01",
+            "description": "Nombre de la lección (el de su carpeta). **Único**, sin distinguir mayúsculas ni acentos (colación `utf8mb4_general_ci`). No puede estar en blanco."
+          },
+          "objetivo": {
+            "$ref": "#/components/schemas/Objetivo"
+          },
+          "fechaImportacion": {
+            "$ref": "#/components/schemas/FechaHoraLocal"
+          }
+        }
+      },
+      "Leccion": {
+        "type": "object",
+        "required": [
+          "id",
+          "nombre",
+          "contenidoMarkdown",
+          "objetivo",
+          "fechaImportacion",
+          "imagenes"
+        ],
+        "description": "Detalle completo de una lección, con su Markdown y sus imágenes.",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 1,
+            "example": 1
+          },
+          "nombre": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "pattern": "\\S",
+            "example": "leccion-01",
+            "description": "Nombre de la lección (el de su carpeta). **Único**, sin distinguir mayúsculas ni acentos (colación `utf8mb4_general_ci`). No puede estar en blanco."
+          },
+          "contenidoMarkdown": {
+            "type": "string",
+            "minLength": 0,
+            "maxLength": 1000000,
+            "example": "# Hola mundo\n\nEscribe este programa:\n\n![diagrama](img-lec-1.png)\n",
+            "description": "Contenido de `leccion.md` (UTF-8). Puede referenciar las imágenes por su nombre de archivo."
+          },
+          "objetivo": {
+            "$ref": "#/components/schemas/Objetivo"
+          },
+          "fechaImportacion": {
+            "$ref": "#/components/schemas/FechaHoraLocal"
+          },
+          "imagenes": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "$ref": "#/components/schemas/LeccionImagen"
+            }
+          }
+        }
+      },
+      "LeccionCreate": {
+        "type": "object",
+        "required": [
+          "nombre",
+          "contenidoMarkdown",
+          "objetivo"
+        ],
+        "additionalProperties": false,
+        "description": "Alta de lección (Importar Lección a BD). El `id` y `fechaImportacion` los asigna el servidor.",
+        "properties": {
+          "nombre": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "pattern": "\\S",
+            "example": "leccion-01",
+            "description": "Nombre de la lección (el de su carpeta). **Único**, sin distinguir mayúsculas ni acentos (colación `utf8mb4_general_ci`). No puede estar en blanco."
+          },
+          "contenidoMarkdown": {
+            "type": "string",
+            "minLength": 0,
+            "maxLength": 1000000,
+            "example": "# Hola mundo\n\nEscribe este programa:\n\n![diagrama](img-lec-1.png)\n",
+            "description": "Contenido de `leccion.md` (UTF-8). Puede referenciar las imágenes por su nombre de archivo."
+          },
+          "objetivo": {
+            "$ref": "#/components/schemas/Objetivo"
+          },
+          "imagenes": {
+            "type": "array",
+            "maxItems": 20,
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/LeccionImagen"
+            },
+            "description": "Opcional (por defecto, sin imágenes). Los nombres no pueden repetirse."
+          }
+        }
+      },
+      "LeccionUpdate": {
+        "type": "object",
+        "required": [
+          "nombre",
+          "contenidoMarkdown",
+          "objetivo",
+          "imagenes"
+        ],
+        "additionalProperties": false,
+        "description": "Reemplazo completo de una lección (PUT). `imagenes` es obligatorio: el conjunto enviado **sustituye** al anterior; `[]` elimina todas las imágenes. `fechaImportacion` no cambia.",
+        "properties": {
+          "nombre": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "pattern": "\\S",
+            "example": "leccion-01",
+            "description": "Nombre de la lección (el de su carpeta). **Único**, sin distinguir mayúsculas ni acentos (colación `utf8mb4_general_ci`). No puede estar en blanco."
+          },
+          "contenidoMarkdown": {
+            "type": "string",
+            "minLength": 0,
+            "maxLength": 1000000,
+            "example": "# Hola mundo\n\nEscribe este programa:\n\n![diagrama](img-lec-1.png)\n",
+            "description": "Contenido de `leccion.md` (UTF-8). Puede referenciar las imágenes por su nombre de archivo."
+          },
+          "objetivo": {
+            "$ref": "#/components/schemas/Objetivo"
+          },
+          "imagenes": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "$ref": "#/components/schemas/LeccionImagen"
+            }
+          }
+        }
+      },
+      "Historial": {
+        "type": "object",
+        "required": [
+          "id",
+          "leccionId",
+          "nombreLeccion",
+          "horaApertura",
+          "estado"
+        ],
+        "description": "Un intento: una apertura de lección (tabla `historial`).",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 1,
+            "example": 15
+          },
+          "leccionId": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 1,
+            "nullable": true,
+            "example": 1,
+            "description": "Id de la lección en la BD, o `null` para lecciones locales (que no existen en la BD) o cuyas lecciones se eliminaron (`ON DELETE SET NULL`). Si no es `null`, debe existir (si no, 400 `REFERENCIA_INVALIDA`)."
+          },
+          "nombreLeccion": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "pattern": "\\S",
+            "example": "leccion-01",
+            "description": "Copia del nombre de la lección: se conserva aunque la lección se elimine."
+          },
+          "horaApertura": {
+            "$ref": "#/components/schemas/FechaHoraLocal"
+          },
+          "estado": {
+            "$ref": "#/components/schemas/EstadoHistorial"
+          }
+        }
+      },
+      "HistorialCreate": {
+        "type": "object",
+        "required": [
+          "nombreLeccion"
+        ],
+        "additionalProperties": false,
+        "description": "Alta de un intento. Si se omiten, `estado` es `Pendiente`, `horaApertura` es la hora actual del servidor y `leccionId` es `null`.",
+        "properties": {
+          "leccionId": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 1,
+            "nullable": true,
+            "example": 1,
+            "description": "Id de la lección en la BD, o `null` para lecciones locales (que no existen en la BD) o cuyas lecciones se eliminaron (`ON DELETE SET NULL`). Si no es `null`, debe existir (si no, 400 `REFERENCIA_INVALIDA`)."
+          },
+          "nombreLeccion": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "pattern": "\\S",
+            "example": "leccion-01",
+            "description": "Copia del nombre de la lección: se conserva aunque la lección se elimine."
+          },
+          "horaApertura": {
+            "$ref": "#/components/schemas/FechaHoraLocal"
+          },
+          "estado": {
+            "$ref": "#/components/schemas/EstadoHistorial"
+          }
+        }
+      },
+      "HistorialUpdate": {
+        "type": "object",
+        "required": [
+          "leccionId",
+          "nombreLeccion",
+          "horaApertura",
+          "estado"
+        ],
+        "additionalProperties": false,
+        "description": "Reemplazo completo (PUT). Los cuatro campos son obligatorios (`leccionId` puede ser `null`). No puede pasar un registro `Completada` a `Pendiente` (409).",
+        "properties": {
+          "leccionId": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 1,
+            "nullable": true,
+            "example": 1,
+            "description": "Id de la lección en la BD, o `null` para lecciones locales (que no existen en la BD) o cuyas lecciones se eliminaron (`ON DELETE SET NULL`). Si no es `null`, debe existir (si no, 400 `REFERENCIA_INVALIDA`)."
+          },
+          "nombreLeccion": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "pattern": "\\S",
+            "example": "leccion-01",
+            "description": "Copia del nombre de la lección: se conserva aunque la lección se elimine."
+          },
+          "horaApertura": {
+            "$ref": "#/components/schemas/FechaHoraLocal"
+          },
+          "estado": {
+            "$ref": "#/components/schemas/EstadoHistorial"
+          }
+        }
+      },
+      "HistorialPatch": {
+        "type": "object",
+        "minProperties": 1,
+        "additionalProperties": false,
+        "description": "Actualización parcial (PATCH, merge-patch). Es la operación que usa el cliente para marcar un intento como `Completada`. Solo `leccionId` admite `null`.",
+        "properties": {
+          "leccionId": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 1,
+            "nullable": true,
+            "example": 1,
+            "description": "Id de la lección en la BD, o `null` para lecciones locales (que no existen en la BD) o cuyas lecciones se eliminaron (`ON DELETE SET NULL`). Si no es `null`, debe existir (si no, 400 `REFERENCIA_INVALIDA`)."
+          },
+          "nombreLeccion": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "pattern": "\\S",
+            "example": "leccion-01",
+            "description": "Copia del nombre de la lección: se conserva aunque la lección se elimine."
+          },
+          "horaApertura": {
+            "$ref": "#/components/schemas/FechaHoraLocal"
+          },
+          "estado": {
+            "$ref": "#/components/schemas/EstadoHistorial"
+          }
+        }
+      }
+    },
+    "parameters": {
+      "IdRecurso": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "Identificador del recurso (entero ≥ 1).",
+        "schema": {
+          "type": "integer",
+          "format": "int32",
+          "minimum": 1,
+          "example": 1
+        }
+      }
+    },
+    "headers": {
+      "Location": {
+        "description": "URL absoluta del recurso creado.",
+        "schema": {
+          "type": "string",
+          "format": "uri",
+          "example": "https://localhost:8443/api/lecciones/1"
+        }
+      }
+    },
+    "responses": {
+      "ErrorInterno": {
+        "description": "Error inesperado del servidor (no se exponen detalles internos).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "examples": {
+              "interno": {
+                "summary": "Fallo no controlado (p. ej. MariaDB no disponible)",
+                "value": {
+                  "status": 500,
+                  "error": "INTERNAL_SERVER_ERROR",
+                  "codigo": "ERROR_INTERNO",
+                  "message": "Ocurrió un error interno. Intente de nuevo más tarde.",
+                  "path": "/api/lecciones",
+                  "timestamp": "2026-10-14T21:30:05"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
